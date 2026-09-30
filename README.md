@@ -2,7 +2,7 @@
 
 Hardware breakpoint hooking for OpenGL on Windows x64.
 
-Перехват OpenGL-вызовов через debug-регистры (DR0–DR3) + VEH — без патчинга кода в памяти. Данные передаются внешнему процессу через shared memory.
+Intercepts OpenGL calls via debug registers (DR0–DR3) + Vectored Exception Handler — zero code patching in target memory. Sends intercepted data to an external process through named shared memory.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -36,49 +36,49 @@ Hardware breakpoint hooking for OpenGL on Windows x64.
 └──────────────────────┘
 ```
 
-## Почему hardware breakpoints?
+## Why hardware breakpoints?
 
-| Метод | Детектится через | Меняет память |
-|-------|-----------------|---------------|
-| IAT hook | проверка таблицы импорта | да |
-| Inline hook (jmp patch) | проверка байтов функции | да |
-| **HWBP (этот проект)** | чтение DR0-DR7 | **нет** |
+| Method | Detected by | Modifies memory |
+|--------|-------------|-----------------|
+| IAT hook | import table integrity check | yes |
+| Inline hook (jmp patch) | function prologue byte scan | yes |
+| **HWBP (this project)** | reading DR0-DR7 | **no** |
 
-DR-регистры — часть CPU, не трогают память процесса. Единственный способ обнаружить — `GetThreadContext` и проверить DR0-DR3.
+Debug registers live in the CPU, they don't touch process memory at all. The only way to detect them is `GetThreadContext` + checking DR0-DR3.
 
-## Структура
+## Project structure
 
 ```
 src/
-├── hwbp_hook.h/.cpp      — движок хуков (generic, не привязан к OpenGL)
-├── shared_memory.h       — шаблон shared memory IPC
-├── gl_resolve.h          — резолв адресов GL-функций через wglGetProcAddress
-├── example_hook.cpp      — пример DLL (хукает 4 GL-функции)
-└── reader_example.cpp    — пример reader (читает shared memory, печатает статы)
+├── hwbp_hook.h/.cpp      — generic hook engine (not tied to OpenGL)
+├── shared_memory.h       — typed shared memory IPC template
+├── gl_resolve.h          — resolves GL extension addresses via wglGetProcAddress
+├── example_hook.cpp      — example DLL (hooks 4 GL functions)
+└── reader_example.cpp    — example reader (connects to shared memory, prints frame stats)
 ```
 
-## Сборка
+## Build
 
 ```
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-На выходе:
-- `hwbp_hook.lib` — статическая либа
-- `example_hook.dll` — пример хук-DLL
-- `reader_example.exe` — пример reader
+Output:
+- `hwbp_hook.lib` — static library
+- `example_hook.dll` — example hook DLL
+- `reader_example.exe` — example shared memory reader
 
-## Использование
+## Usage
 
-### Свой хук за 30 строк
+### Your own hook in 30 lines
 
 ```cpp
 #include "hwbp_hook.h"
 #include "gl_resolve.h"
 
 static void OnSwap(CONTEXT* ctx, void*) {
-    // вызывается каждый кадр вместо wglSwapBuffers
+    // called every frame on wglSwapBuffers
 }
 
 static void OnDraw(CONTEXT* ctx, void*) {
@@ -86,7 +86,7 @@ static void OnDraw(CONTEXT* ctx, void*) {
 }
 
 DWORD WINAPI Init(LPVOID) {
-    Sleep(3000); // ждём пока GL инициализируется
+    Sleep(3000); // wait for GL to initialize
 
     GlAddresses gl = {};
     if (!ResolveGlAddresses(gl)) return 1;
@@ -104,43 +104,43 @@ DWORD WINAPI Init(LPVOID) {
 ### Shared memory IPC
 
 ```cpp
-// В DLL (внутри таргета):
+// Inside DLL (target process):
 SharedMemory<MyData> shm;
 shm.Create(L"Local\\MyHook_12345");
 shm.Get()->frameCount = 42;
 
-// В reader (внешний процесс):
+// External reader process:
 SharedMemory<MyData> shm;
 shm.Open(L"Local\\MyHook_12345");
 printf("frames: %d\n", shm.Get()->frameCount);
 ```
 
-## x64 calling convention
+## x64 calling convention reference
 
-VEH даёт полный `CONTEXT*` потока. Аргументы функций по Windows x64 ABI:
+The VEH callback receives the full thread `CONTEXT*`. Function arguments follow the Windows x64 ABI:
 
-| Регистр | Аргумент |
-|---------|----------|
-| RCX | 1-й (int/ptr) |
-| RDX | 2-й |
-| R8 | 3-й |
-| R9 | 4-й |
-| XMM0-3 | 1-4й (float/double) |
-| Stack | 5+ |
+| Register | Argument |
+|----------|----------|
+| RCX | 1st (int/ptr) |
+| RDX | 2nd |
+| R8 | 3rd |
+| R9 | 4th |
+| XMM0-3 | 1st-4th (float/double) |
+| Stack | 5th+ |
 
-Пример — `glUniformMatrix4fv(location, count, transpose, value)`:
+Example — `glUniformMatrix4fv(location, count, transpose, value)`:
 - `ctx->Rcx` = location
 - `ctx->Rdx` = count
 - `ctx->R8` = transpose
 - `ctx->R9` = pointer to float[16] matrix
 
-## Ограничения
+## Limitations
 
-- Только Windows x64
-- Максимум 4 хука одновременно (аппаратный лимит DR0-DR3)
-- `gl_resolve.h` — для OpenGL, но сам `hwbp_hook` работает с любой функцией
-- Потоки созданные после установки хуков не получат breakpoints автоматически
-- Античит может читать debug-регистры через `GetThreadContext`
+- Windows x64 only
+- Max 4 hooks at a time (CPU hardware limit, DR0-DR3)
+- `gl_resolve.h` is OpenGL-specific, but `hwbp_hook` itself works with any function address
+- Threads spawned after hook installation won't have breakpoints set automatically
+- Anti-cheat can read debug registers via `GetThreadContext`
 
 ## License
 
